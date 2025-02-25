@@ -1,0 +1,189 @@
+import os
+import pandas as pd
+import matplotlib.pyplot as plt
+from openpyxl import load_workbook
+from openpyxl.drawing.image import Image
+import numpy as np
+from scipy.stats import linregress
+
+def calculate_fractal_dimension(sieve_sizes, percentage_passing):
+    """
+    Calculate the fractal dimension from particle size distribution data.
+
+    Parameters:
+        sieve_sizes (pd.Series): Sieve sizes (mm).
+        percentage_passing (pd.Series): Percentage passing data (%).
+
+    Returns:
+        float: Estimated fractal dimension.
+    """
+    # Identify d_max as the sieve size corresponding to the first non-100% passing value
+    non_100_indices = np.where(percentage_passing < 100)[1]
+    #print(non_100_indices)
+    #print(sieve_sizes)
+    d_max = sieve_sizes[non_100_indices[0]] if non_100_indices.size > 0 else max(sieve_sizes)
+
+     
+    
+    # Normalize sieve sizes
+    x_values = sieve_sizes / d_max
+    log_sieve_sizes = np.log(x_values)
+    if (sieve_sizes <= 0).any():
+        raise ValueError("Sieve sizes must be positive numbers.")
+
+    percentage_passing = percentage_passing*0.01
+    print(f"percentage_passing:{percentage_passing}")
+    
+
+
+     # Compute local slopes between consecutive points
+    print(f"x_values:{x_values}")
+    Regression_start_point_x = list(filter(lambda x: x <= 1.0, x_values))
+    #print(f"Regression_start_point_x:{Regression_start_point_x}")
+    Regression_start_point_y = percentage_passing[np.where(x_values <= 1.0)]
+    #Regression_start_point_y = percentage_passing[Regression_start_point_x]
+    print(f"Regression_start_point_y:{Regression_start_point_y}")
+    
+    local_slopes = np.diff(Regression_start_point_y) / np.diff(Regression_start_point_x)
+
+    # Identify the breakpoint where the largest change in slope occurs
+    slope_changes = np.abs(np.diff(local_slopes))
+    break_index = np.argmax(slope_changes) + 1  # +1 to get the actual breakpoint
+
+    # Split data at the identified breakpoint
+    x1, pp1 = x_values[:break_index], percentage_passing[:break_index]
+    x2, pp2 = x_values[break_index:], percentage_passing[break_index:]
+
+    # Perform regression on both segments
+    slope2a, intercept2a, r_value2a, _, _ = linregress(x1, pp1)
+    slope2b, intercept2b, r_value2b, _, _ = linregress(x2, pp2)
+    
+
+    # Compute fractal dimensions for piecewise fit
+    fractal_dimension2a = 3 - slope2a
+    print(slope2a)
+    fractal_dimension2b = 3 - slope2b
+    #print(slope2b)
+
+    # Perform single linear fit on log-log data
+    slope1, intercept1, r_value1, _, _ = linregress(x_values, percentage_passing)
+    
+    # The slope of the regression line is related to the fractal dimension
+    fractal_dimension1 = 3-slope1
+    #print(slope1)
+
+    # Compute the new R² for piecewise regression
+    piecewise_r2 = (r_value2a**2 + r_value2b**2) / 2  # Average R² of both segments
+    print("piecewise r2")
+    print(piecewise_r2)
+    single_fit_r2 = r_value1**2 
+    print("single_fit_r2")
+    print(single_fit_r2)
+
+        
+    # Choose best fit based on R² values
+    fractal_dimension = fractal_dimension1 if single_fit_r2 > piecewise_r2 else fractal_dimension2a/fractal_dimension2b
+    return fractal_dimension
+
+def generate_psd_curves_with_fixed_sieve_row(
+    orig_excel_file,
+    new_excel_file,
+    orig_sheet_name,
+    new_sheet_name,
+    sieve_row,
+    passing_rows,
+    output_image_prefix='psd_curve'
+):
+    """
+    Generate particle size distribution (PSD) curves using a fixed sieve size row and multiple percentage passing rows
+    from an Excel sheet, and save the plots back into the same Excel file. Also calculate and add fractal dimensions
+    to the Excel sheet.
+
+    Parameters:
+        excel_file (str): Path to the Excel file.
+        sheet_name (str): Name of the sheet to read data from.
+        sieve_row (int): Row index for sieve sizes (0-based index).
+        passing_rows (list of int): List of row indices for percentage passing (0-based index).
+        output_image_prefix (str): Prefix for the output plot images.
+    """
+    # Check if the file exists
+    if not os.path.exists(orig_excel_file):
+        raise FileNotFoundError(f"The file '{orig_excel_file}' does not exist.")
+
+    # Load the specified sheet from the Excel file
+    df1 = pd.read_excel(orig_excel_file, sheet_name=orig_sheet_name, header=None)
+    df2 = pd.read_excel(new_excel_file, sheet_name=new_sheet_name, header=None)
+
+    # Extract the fixed sieve sizes row, from the second to the twelfth column
+    sieve_sizes = df1.iloc[sieve_row, 1:12].dropna()
+    sieve_sizes = pd.to_numeric(sieve_sizes, errors='coerce').dropna()
+    print(f"sieve sizes:{sieve_sizes}")
+
+    # Load the Excel workbook to add images and fractal dimensions later
+    wb = load_workbook(orig_excel_file)
+    ws = wb[orig_sheet_name]
+    fb = load_workbook(new_excel_file)
+    fs = fb[new_sheet_name]
+
+    for idx, passing_row in enumerate(passing_rows):
+        # Extract the percentage passing row, from the second to the ninth column
+        percentage_passing = df1.iloc[passing_row, 1:12].dropna()
+        percentage_passing = pd.to_numeric(percentage_passing, errors='coerce').dropna()
+
+        # Ensure the data lengths match
+        sieve_sizes_trimmed = sieve_sizes[:len(percentage_passing)]
+        percentage_passing_trimmed = percentage_passing[:len(sieve_sizes_trimmed)]
+
+        # Calculate the fractal dimension
+        fractal_dimension = calculate_fractal_dimension(sieve_sizes_trimmed, percentage_passing_trimmed)
+        print(f"Fractal dimension:' {fractal_dimension}'")
+
+        # Add the fractal dimension to the New Excel sheet in the 30th column of the passing row
+        fs.cell(row=passing_row+1, column=30, value=fractal_dimension)
+
+        # Get the title from the first column of the passing row
+        plot_title = df1.iloc[passing_row, 0] if not pd.isna(df1.iloc[passing_row, 0]) else f'PSD Curve {idx + 1}'
+
+        # Plot the particle size distribution curve
+        plt.figure(figsize=(8, 6))
+        plt.plot(sieve_sizes_trimmed, percentage_passing_trimmed, marker='o', linestyle='-', label=f'PSD Curve {idx + 1}')
+        plt.xscale('log')
+        plt.xlabel('Sieve Size (mm)', fontsize=12)
+        plt.ylabel('Percentage Passing (%)', fontsize=12)
+        plt.title(plot_title, fontsize=14)
+        plt.grid(which='both', linestyle='--', linewidth=0.7)
+        plt.legend()
+        plt.tight_layout()
+
+        # Save the plot as an image
+        output_image = f'{output_image_prefix}_{plot_title}.png'
+        plt.savefig('C:/Users/ampbe/Documents/Education/PhD/Data Collection/Addison Data compilation/Grading Images/{}'.format(output_image))
+        plt.close()
+
+        # Add the image to the Excel file
+        #img = Image(output_image)
+        #img.anchor = f'E{2 + idx * 20}'  # Dynamically place images
+        #ws.add_image(img)
+
+        # Save the updated Excel file
+        fb.save(new_excel_file)
+
+# Example usage
+# Specify the input Excel file, sheet name, fixed sieve row, and multiple passing rows
+orig_excel_file = "C:/Users/ampbe/Documents/Education/PhD/Data Collection/Addison Data compilation/Data sheet.xlsx"  # Replace with your file path
+new_excel_file = "C:/Users/ampbe/Documents/Education/PhD/Data Collection/Addison Data compilation/Fractal dimension/Data sheet final.xlsx" # Replace with your file path
+orig_sheet_name = 'OVERRALL TEMPLATE'  # Replace with your sheet name
+new_sheet_name = 'OVERRALL TEMPLATE' # Replace with your sheet name
+sieve_row = 2  # Row containing sieve sizes (0-based index)
+passing_rows = range(6,7) # Rows containing percentage passing (0-based index)
+ 
+
+# Generate PSD curves and save them in the Excel file
+try:
+    generate_psd_curves_with_fixed_sieve_row(orig_excel_file, new_excel_file, orig_sheet_name, new_sheet_name, sieve_row, passing_rows)
+    print(f"PSD curves and fractal dimensions have been generated and saved in '{new_excel_file}'.")
+except FileNotFoundError as e:
+    print(e)
+except ValueError as e:
+    print(e)
+
